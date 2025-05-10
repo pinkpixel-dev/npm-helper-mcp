@@ -15,7 +15,8 @@ import {
   Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 import * as ncu from 'npm-check-updates';
-import * as fs from 'fs-extra';
+import fs from 'fs';
+import fsExtra from 'fs-extra';
 import * as path from 'path';
 import * as cheerio from 'cheerio';
 import { z } from 'zod'; // Import Zod [2][4][6]
@@ -172,13 +173,51 @@ class NpmSearcher {
     this.rateLimiter = new RateLimiter(2);
   }
 
+  // Helper method to log memory usage
+  private logMemoryUsage(operation: string) {
+    if (process.memoryUsage) {
+      const memUsage = process.memoryUsage();
+      logger.debug(`Memory usage ${operation}: RSS=${Math.round(memUsage.rss / 1024 / 1024)}MB, Heap=${Math.round(memUsage.heapUsed / 1024 / 1024)}MB`);
+      
+      // Force garbage collection if available and memory usage is high
+      if (memUsage.heapUsed > 200 * 1024 * 1024 && global.gc) {
+        logger.info("Memory usage high, forcing garbage collection");
+        try {
+          global.gc();
+        } catch (e) {
+          logger.error("Failed to force garbage collection", e);
+        }
+      }
+    }
+  }
+
+  // Add timeout to any fetch request
+  private async fetchWithTimeout(url: string, options: RequestInit = {}, timeoutMs: number = 10000): Promise<Response> {
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), timeoutMs);
+    
+    try {
+      const response = await fetch(url, {
+        ...options,
+        signal: controller.signal
+      });
+      clearTimeout(id);
+      return response;
+    } catch (error) {
+      clearTimeout(id);
+      throw error;
+    }
+  }
+
   async searchPackages(args: SearchNpmArgs): Promise<NpmSearchResult> {
     const { query, maxResults } = args;
     try {
+      this.logMemoryUsage("before search");
       await this.rateLimiter.acquire();
       const searchUrl = `${NpmSearcher.REGISTRY_URL}/-/v1/search?text=${encodeURIComponent(query)}&size=${maxResults}`;
-      const response = await fetch(searchUrl, { headers: NpmSearcher.HEADERS });
+      const response = await this.fetchWithTimeout(searchUrl, { headers: NpmSearcher.HEADERS }, 15000);
       if (!response.ok) throw new Error(`HTTP error! Status: ${response.status}`);
+      
       const data = await response.json();
       const packages: NpmPackageInfo[] = data.objects.map((obj: any) => ({
         name: obj.package.name,
@@ -191,6 +230,8 @@ class NpmSearcher {
         weeklyDownloads: obj.score?.detail?.maintenance?.toString(),
         lastPublish: new Date(obj.package.date).toLocaleDateString()
       }));
+      
+      this.logMemoryUsage("after search");
       return { packages, totalResults: data.total };
     } catch (error) {
       throw new Error(`Error searching npm packages: ${error instanceof Error ? error.message : String(error)}`);
@@ -200,10 +241,12 @@ class NpmSearcher {
   async fetchPackageContent(args: FetchPackageContentArgs): Promise<string> {
     const { url } = args;
     try {
+      this.logMemoryUsage("before fetch content");
       await this.rateLimiter.acquire();
       logger.info(`Fetching content from: ${url}`);
-      const response = await fetch(url, { headers: NpmSearcher.HEADERS, redirect: 'follow' });
+      const response = await this.fetchWithTimeout(url, { headers: NpmSearcher.HEADERS, redirect: 'follow' }, 20000);
       if (!response.ok) throw new Error(`HTTP error! Status: ${response.status}`);
+      
       const html = await response.text();
       const $ = cheerio.load(html);
       $('script, style, nav, header, footer').remove();
@@ -218,6 +261,8 @@ class NpmSearcher {
       if (readme) {
         content += `README:\n${readme.length > 4000 ? readme.substring(0, 4000) + '...\n[README content truncated]' : readme}`;
       }
+      
+      this.logMemoryUsage("after fetch content");
       return content || "No extractable content found.";
     } catch (error) {
       throw new Error(`Error fetching package content: ${error instanceof Error ? error.message : String(error)}`);
@@ -227,10 +272,16 @@ class NpmSearcher {
   async getPackageVersions(args: GetPackageVersionsArgs): Promise<string[]> {
     const { packageName } = args;
     try {
-      const response = await fetch(`${NpmSearcher.REGISTRY_URL}/${packageName}`, { headers: NpmSearcher.HEADERS });
+      this.logMemoryUsage("before get versions");
+      await this.rateLimiter.acquire();
+      const response = await this.fetchWithTimeout(`${NpmSearcher.REGISTRY_URL}/${packageName}`, { headers: NpmSearcher.HEADERS }, 15000);
       if (!response.ok) throw new Error(`HTTP error! Status: ${response.status}`);
+      
       const data = await response.json();
-      return Object.keys(data.versions).reverse();
+      const versions = Object.keys(data.versions).reverse();
+      
+      this.logMemoryUsage("after get versions");
+      return versions;
     } catch (error) {
       throw new Error(`Error fetching package versions: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -239,9 +290,52 @@ class NpmSearcher {
   async getPackageDetails(args: GetPackageDetailsArgs): Promise<any> {
     const { packageName } = args;
     try {
-      const response = await fetch(`${NpmSearcher.REGISTRY_URL}/${packageName}`, { headers: NpmSearcher.HEADERS });
+      this.logMemoryUsage("before get details");
+      await this.rateLimiter.acquire();
+      const response = await this.fetchWithTimeout(`${NpmSearcher.REGISTRY_URL}/${packageName}`, { headers: NpmSearcher.HEADERS }, 20000);
       if (!response.ok) throw new Error(`HTTP error! Status: ${response.status}`);
-      return await response.json();
+      
+      const data = await response.json();
+      
+      // Process data to limit memory impact
+      const processedData = {
+        name: data.name,
+        description: data.description,
+        'dist-tags': data['dist-tags'],
+        maintainers: data.maintainers,
+        homepage: data.homepage,
+        repository: data.repository,
+        license: data.license,
+        // Only include the 10 most recent versions to reduce memory usage
+        versions: Object.fromEntries(
+          Object.entries(data.versions)
+            .slice(-10)
+            .map(([version, details]: [string, any]) => [
+              version,
+              {
+                name: details.name,
+                version: details.version,
+                description: details.description,
+                main: details.main,
+                dependencies: details.dependencies,
+                devDependencies: details.devDependencies,
+                peerDependencies: details.peerDependencies
+              }
+            ])
+        ),
+        time: data.time ? {
+          created: data.time.created,
+          modified: data.time.modified,
+          ...Object.fromEntries(
+            Object.entries(data.time)
+              .filter(([key]) => !['created', 'modified'].includes(key))
+              .slice(-10)
+          )
+        } : undefined
+      };
+      
+      this.logMemoryUsage("after get details");
+      return processedData;
     } catch (error) {
       throw new Error(`Error fetching package details: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -270,9 +364,9 @@ class NpmSearcher {
 
 
 class NpmCheckUpdatesHandler {
-  private resolvePackagePath(packagePath?: string): string { /* ... (same as before) ... */
+  private resolvePackagePath(packagePath?: string): string {
     const resolvedPath = path.resolve(process.cwd(), packagePath || 'package.json');
-    if (!fs.pathExistsSync(resolvedPath)) {
+    if (!fs.existsSync(resolvedPath)) {
       throw new Error(`Package file not found: ${resolvedPath}`);
     }
     return resolvedPath;
@@ -420,7 +514,7 @@ class NpmCheckUpdatesHandler {
 const server = new Server(
   {
     name: "npm-helper-mcp",
-    version: "2.0.4",
+    version: "2.0.5",
   },
   {
     capabilities: {
@@ -444,6 +538,12 @@ process.on('SIGINT', async () => {
   await server.close();
   process.exit(0);
 });
+
+// Define ToolResult type for MCP tools
+type ToolResult = { 
+  content: Array<{ type: string; text: string }>;
+  isError?: boolean;
+};
 
 // Register our tool handlers
 server.setRequestHandler(
@@ -489,79 +589,128 @@ server.setRequestHandler(
 
 server.setRequestHandler(
   CallToolRequestSchema,
-  async (request) => {
+  async (request, extra) => {
     const { name, arguments: args } = request.params;
     let parsedArgs: any; // To hold Zod parsed data
+    const startTime = Date.now();
+    
+    // Check memory at the start of processing a tool call
+    if (process.memoryUsage) {
+      const memUsage = process.memoryUsage();
+      logger.debug(`Memory before tool call (${name}): RSS=${Math.round(memUsage.rss / 1024 / 1024)}MB, Heap=${Math.round(memUsage.heapUsed / 1024 / 1024)}MB`);
+    }
 
     try {
-      switch (name) {
-        case "search_npm": {
-          parsedArgs = SearchNpmSchema.safeParse(args);
-          if (!parsedArgs.success) throw new McpError(ErrorCode.InvalidParams, `Invalid arguments: ${parsedArgs.error.format()}`);
-          const results = await npmSearcher.searchPackages(parsedArgs.data);
-          return { content: [{ type: "text", text: npmSearcher.formatSearchResults(results) }] };
-        }
-        case "fetch_package_content": {
-          parsedArgs = FetchPackageContentSchema.safeParse(args);
-          if (!parsedArgs.success) throw new McpError(ErrorCode.InvalidParams, `Invalid arguments: ${parsedArgs.error.format()}`);
-          const content = await npmSearcher.fetchPackageContent(parsedArgs.data);
-          return { content: [{ type: "text", text: content }] };
-        }
-        case "get_package_versions": {
-          parsedArgs = GetPackageVersionsSchema.safeParse(args);
-          if (!parsedArgs.success) throw new McpError(ErrorCode.InvalidParams, `Invalid arguments: ${parsedArgs.error.format()}`);
-          const versions = await npmSearcher.getPackageVersions(parsedArgs.data);
-          return { content: [{ type: "text", text: npmSearcher.formatVersions(parsedArgs.data.packageName, versions) }] };
-        }
-        case "get_package_details": {
-          parsedArgs = GetPackageDetailsSchema.safeParse(args);
-          if (!parsedArgs.success) throw new McpError(ErrorCode.InvalidParams, `Invalid arguments: ${parsedArgs.error.format()}`);
-          const details = await npmSearcher.getPackageDetails(parsedArgs.data);
-          return { content: [{ type: "text", text: JSON.stringify(details, null, 2) }] };
-        }
+      // Set a timeout for all tool calls to prevent lockups
+      const toolTimeout = 30000; // 30 seconds default timeout
+      const timeoutPromise = new Promise<ToolResult>((_, reject) => {
+        setTimeout(() => reject(new Error(`Tool execution timed out after ${toolTimeout/1000}s`)), toolTimeout);
+      });
+      
+      // Execute the tool call with a timeout
+      const resultPromise = (async (): Promise<ToolResult> => {
+        switch (name) {
+          case "search_npm": {
+            parsedArgs = SearchNpmSchema.safeParse(args);
+            if (!parsedArgs.success) throw new McpError(ErrorCode.InvalidParams, `Invalid arguments: ${parsedArgs.error.format()}`);
+            const results = await npmSearcher.searchPackages(parsedArgs.data);
+            return { content: [{ type: "text", text: npmSearcher.formatSearchResults(results) }] };
+          }
+          case "fetch_package_content": {
+            parsedArgs = FetchPackageContentSchema.safeParse(args);
+            if (!parsedArgs.success) throw new McpError(ErrorCode.InvalidParams, `Invalid arguments: ${parsedArgs.error.format()}`);
+            const content = await npmSearcher.fetchPackageContent(parsedArgs.data);
+            return { content: [{ type: "text", text: content }] };
+          }
+          case "get_package_versions": {
+            parsedArgs = GetPackageVersionsSchema.safeParse(args);
+            if (!parsedArgs.success) throw new McpError(ErrorCode.InvalidParams, `Invalid arguments: ${parsedArgs.error.format()}`);
+            const versions = await npmSearcher.getPackageVersions(parsedArgs.data);
+            return { content: [{ type: "text", text: npmSearcher.formatVersions(parsedArgs.data.packageName, versions) }] };
+          }
+          case "get_package_details": {
+            parsedArgs = GetPackageDetailsSchema.safeParse(args);
+            if (!parsedArgs.success) throw new McpError(ErrorCode.InvalidParams, `Invalid arguments: ${parsedArgs.error.format()}`);
+            const details = await npmSearcher.getPackageDetails(parsedArgs.data);
+            return { content: [{ type: "text", text: JSON.stringify(details, null, 2) }] };
+          }
 
-        // npm-check-updates tools
-        case "check_updates":
-          parsedArgs = CheckUpdatesSchema.safeParse(args);
-          if (!parsedArgs.success) throw new McpError(ErrorCode.InvalidParams, `Invalid arguments: ${parsedArgs.error.format()}`);
-          const checkResult = await ncuHandler.checkUpdates(parsedArgs.data);
-          return { content: [{ type: "text", text: `${checkResult.message}\n\n${JSON.stringify(checkResult.data, null, 2)}` }] };
-        
-        case "upgrade_packages":
-          parsedArgs = UpgradePackagesSchema.safeParse(args);
-          if (!parsedArgs.success) throw new McpError(ErrorCode.InvalidParams, `Invalid arguments: ${parsedArgs.error.format()}`);
-          const upgradeResult = await ncuHandler.upgradePackages(parsedArgs.data);
-          return { content: [{ type: "text", text: `${upgradeResult.message}\n\n${JSON.stringify(upgradeResult.data, null, 2)}` }] };
-
-        case "filter_updates":
-          parsedArgs = FilterUpdatesSchema.safeParse(args);
-          if (!parsedArgs.success) throw new McpError(ErrorCode.InvalidParams, `Invalid arguments: ${parsedArgs.error.format()}`);
-          const filterResult = await ncuHandler.filterUpdates(parsedArgs.data);
-          return { content: [{ type: "text", text: `${filterResult.message}\n\n${JSON.stringify(filterResult.data, null, 2)}` }] };
-
-        case "resolve_conflicts":
-          parsedArgs = ResolveConflictsSchema.safeParse(args);
-          if (!parsedArgs.success) throw new McpError(ErrorCode.InvalidParams, `Invalid arguments: ${parsedArgs.error.format()}`);
-          const resolveResult = await ncuHandler.resolveConflicts({ ...parsedArgs.data, peer: true }); // 'peer' is implicit
-          return { content: [{ type: "text", text: `${resolveResult.message}\n\n${JSON.stringify(resolveResult.data, null, 2)}` }] };
-
-        case "set_version_constraints":
-          parsedArgs = SetVersionConstraintsSchema.safeParse(args);
-          if (!parsedArgs.success) throw new McpError(ErrorCode.InvalidParams, `Invalid arguments: ${parsedArgs.error.format()}`);
-          const setResult = await ncuHandler.setVersionConstraints(parsedArgs.data);
-          return { content: [{ type: "text", text: `${setResult.message}\n\n${JSON.stringify(setResult.data, null, 2)}` }] };
-
-        case "run_doctor":
-          parsedArgs = RunDoctorSchema.safeParse(args);
-          if (!parsedArgs.success) throw new McpError(ErrorCode.InvalidParams, `Invalid arguments: ${parsedArgs.error.format()}`);
-          const doctorResult = await ncuHandler.runDoctor(parsedArgs.data);
-          return { content: [{ type: "text", text: `${doctorResult.message}\n\n${JSON.stringify(doctorResult.data, null, 2)}` }] };
+          // npm-check-updates tools
+          case "check_updates":
+            parsedArgs = CheckUpdatesSchema.safeParse(args);
+            if (!parsedArgs.success) throw new McpError(ErrorCode.InvalidParams, `Invalid arguments: ${parsedArgs.error.format()}`);
+            const checkResult = await ncuHandler.checkUpdates(parsedArgs.data);
+            return { content: [{ type: "text", text: `${checkResult.message}\n\n${JSON.stringify(checkResult.data, null, 2)}` }] };
           
-        default:
-          throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
+          case "upgrade_packages":
+            parsedArgs = UpgradePackagesSchema.safeParse(args);
+            if (!parsedArgs.success) throw new McpError(ErrorCode.InvalidParams, `Invalid arguments: ${parsedArgs.error.format()}`);
+            const upgradeResult = await ncuHandler.upgradePackages(parsedArgs.data);
+            return { content: [{ type: "text", text: `${upgradeResult.message}\n\n${JSON.stringify(upgradeResult.data, null, 2)}` }] };
+
+          case "filter_updates":
+            parsedArgs = FilterUpdatesSchema.safeParse(args);
+            if (!parsedArgs.success) throw new McpError(ErrorCode.InvalidParams, `Invalid arguments: ${parsedArgs.error.format()}`);
+            const filterResult = await ncuHandler.filterUpdates(parsedArgs.data);
+            return { content: [{ type: "text", text: `${filterResult.message}\n\n${JSON.stringify(filterResult.data, null, 2)}` }] };
+
+          case "resolve_conflicts":
+            parsedArgs = ResolveConflictsSchema.safeParse(args);
+            if (!parsedArgs.success) throw new McpError(ErrorCode.InvalidParams, `Invalid arguments: ${parsedArgs.error.format()}`);
+            const resolveResult = await ncuHandler.resolveConflicts({ ...parsedArgs.data, peer: true }); // 'peer' is implicit
+            return { content: [{ type: "text", text: `${resolveResult.message}\n\n${JSON.stringify(resolveResult.data, null, 2)}` }] };
+
+          case "set_version_constraints":
+            parsedArgs = SetVersionConstraintsSchema.safeParse(args);
+            if (!parsedArgs.success) throw new McpError(ErrorCode.InvalidParams, `Invalid arguments: ${parsedArgs.error.format()}`);
+            const setResult = await ncuHandler.setVersionConstraints(parsedArgs.data);
+            return { content: [{ type: "text", text: `${setResult.message}\n\n${JSON.stringify(setResult.data, null, 2)}` }] };
+
+          case "run_doctor":
+            parsedArgs = RunDoctorSchema.safeParse(args);
+            if (!parsedArgs.success) throw new McpError(ErrorCode.InvalidParams, `Invalid arguments: ${parsedArgs.error.format()}`);
+            const doctorResult = await ncuHandler.runDoctor(parsedArgs.data);
+            return { content: [{ type: "text", text: `${doctorResult.message}\n\n${JSON.stringify(doctorResult.data, null, 2)}` }] };
+            
+          default:
+            throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
+        }
+      })();
+      
+      // Race between the tool execution and the timeout
+      const result = await Promise.race([resultPromise, timeoutPromise]) as { 
+        content: Array<{ type: string; text: string }>
+      };
+      
+      // Log execution time and memory after successful tool call
+      const executionTime = Date.now() - startTime;
+      logger.debug(`Tool '${name}' executed in ${executionTime}ms`);
+      
+      if (process.memoryUsage) {
+        const memUsage = process.memoryUsage();
+        logger.debug(`Memory after tool call (${name}): RSS=${Math.round(memUsage.rss / 1024 / 1024)}MB, Heap=${Math.round(memUsage.heapUsed / 1024 / 1024)}MB`);
+        
+        // Force garbage collection if memory usage is high
+        if (memUsage.heapUsed > 200 * 1024 * 1024 && global.gc) {
+          logger.info("Memory usage high after tool call, forcing garbage collection");
+          try {
+            global.gc();
+          } catch (e) {
+            logger.error("Failed to force garbage collection", e);
+          }
+        }
       }
+      
+      return result;
     } catch (error) {
-      process.stderr.write(`[ERROR] Tool error (${name}): ${error instanceof Error ? error.message : String(error)}\n`);
+      const executionTime = Date.now() - startTime;
+      logger.error(`Tool '${name}' failed after ${executionTime}ms: ${error instanceof Error ? error.message : String(error)}`);
+      
+      if (process.memoryUsage) {
+        const memUsage = process.memoryUsage();
+        logger.debug(`Memory after tool error (${name}): RSS=${Math.round(memUsage.rss / 1024 / 1024)}MB, Heap=${Math.round(memUsage.heapUsed / 1024 / 1024)}MB`);
+      }
+      
       if (error instanceof McpError) {
         // For McpErrors (like validation errors), re-throw to let SDK handle standard formatting.
         throw error;
@@ -570,7 +719,7 @@ server.setRequestHandler(
       return {
         content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
         isError: true // Indicate this is an error response as per MCP spec
-      };
+      } as ToolResult;
     }
   }
 );
@@ -578,9 +727,58 @@ server.setRequestHandler(
 // Launch the server
 async function runServer() {
   try {
+    // Report initial memory usage
+    if (process.memoryUsage) {
+      const memUsage = process.memoryUsage();
+      logger.info(`Initial memory usage: RSS=${Math.round(memUsage.rss / 1024 / 1024)}MB, Heap=${Math.round(memUsage.heapUsed / 1024 / 1024)}MB`);
+    }
+    
+    // Check if we should try to enable hardware acceleration
+    const useHardwareAcceleration = process.env.HARDWARE_ACCELERATION === 'true';
+    if (useHardwareAcceleration) {
+      logger.info("Attempting to enable hardware acceleration");
+      try {
+        // Try to enable Node.js flags for GPU
+        process.env.NODE_OPTIONS = process.env.NODE_OPTIONS || '';
+        if (!process.env.NODE_OPTIONS.includes('--expose-gc')) {
+          process.env.NODE_OPTIONS += ' --expose-gc';
+        }
+      } catch (err) {
+        logger.error("Failed to set hardware acceleration:", err);
+      }
+    }
+
+    // Setup memory usage monitoring interval
+    const memoryMonitoringInterval = 60000; // Check every minute
+    const memoryMonitor = setInterval(() => {
+      if (process.memoryUsage) {
+        const memUsage = process.memoryUsage();
+        logger.debug(`Current memory usage: RSS=${Math.round(memUsage.rss / 1024 / 1024)}MB, Heap=${Math.round(memUsage.heapUsed / 1024 / 1024)}MB`);
+        
+        // Force garbage collection if available and memory usage is high
+        if (memUsage.heapUsed > 200 * 1024 * 1024 && global.gc) {
+          logger.info("Memory usage high during periodic check, forcing garbage collection");
+          try {
+            global.gc();
+            // Check memory again after GC
+            const afterGcMemUsage = process.memoryUsage();
+            logger.info(`Memory after GC: RSS=${Math.round(afterGcMemUsage.rss / 1024 / 1024)}MB, Heap=${Math.round(afterGcMemUsage.heapUsed / 1024 / 1024)}MB`);
+          } catch (e) {
+            logger.error("Failed to force garbage collection", e);
+          }
+        }
+      }
+    }, memoryMonitoringInterval);
+    
+    // Make sure we clear the interval when the process exits
+    process.on('exit', () => {
+      clearInterval(memoryMonitor);
+    });
     
     const transport = new StdioServerTransport();
     await server.connect(transport);
+    
+    logger.info("NPM Helper MCP Server is running and connected via stdio");
     
   } catch (error) {
     logger.error(`Fatal error starting server: ${error instanceof Error ? error.message : String(error)}`);

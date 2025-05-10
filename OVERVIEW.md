@@ -2,7 +2,7 @@
 
 ## Project Information
 - **Name**: npm-helper-mcp
-- **Version**: 2.0.4
+- **Version**: 2.0.5
 - **Date Last Updated**: May 10, 2025
 - **Author**: Pink Pixel
 
