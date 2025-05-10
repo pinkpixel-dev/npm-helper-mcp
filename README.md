@@ -26,7 +26,6 @@ There are also tools available to search and retrieve information from npmjs, if
 ### NPM Search Tools
 
 - 🔍 **searchPackages**: Search npmjs.org registry for packages
-- 🔎 **enhancedSearch**: Enhanced natural language search using DuckDuckGo
 - 📝 **fetchPackageContent**: Scrape and extract content from npm package pages
 - 📋 **getPackageVersions**: Retrieve version history of packages
 - 📝 **getPackageDetails**: Fetch detailed package metadata
@@ -330,27 +329,6 @@ Example:
   "name": "search_npm",
   "arguments": {
     "query": "react state management",
-    "maxResults": 5
-  }
-}
-```
-
-#### Tool: enhanced_search_npm
-
-Enhanced search for npm packages using natural language queries and DuckDuckGo.
-
-Parameters:
-
-- `query` (required): Natural language search query for npm packages
-- `maxResults` (optional): Maximum number of results to return (default: 10)
-
-Example:
-
-```json
-{
-  "name": "enhanced_search_npm",
-  "arguments": {
-    "query": "best react state management library with redux-like features",
     "maxResults": 5
   }
 }

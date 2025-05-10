@@ -41,12 +41,6 @@ const SearchNpmSchema = z.object({
 });
 type SearchNpmArgs = z.infer<typeof SearchNpmSchema>;
 
-const EnhancedSearchNpmSchema = z.object({
-  query: z.string(),
-  maxResults: z.number().optional().default(10),
-});
-type EnhancedSearchNpmArgs = z.infer<typeof EnhancedSearchNpmSchema>;
-
 const FetchPackageContentSchema = z.object({
   url: z.string().url(),
 });
@@ -136,13 +130,6 @@ interface NpmSearchResult {
   totalResults: number;
 }
 
-interface SearchResult {
-  title: string;
-  link: string;
-  snippet: string;
-  position: number;
-}
-
 class RateLimiter { /* ... (same as before) ... */
   private rateLimit: number;
   private queue: Array<() => void> = [];
@@ -173,10 +160,9 @@ class RateLimiter { /* ... (same as before) ... */
   }
 }
 
-class NpmSearcher { /* ... (same as before, method signatures might need slight adjustment if Zod types are used internally) ... */
+class NpmSearcher {
   private static readonly REGISTRY_URL = "https://registry.npmjs.org";
   private static readonly WEBSITE_URL = "https://www.npmjs.com";
-  private static readonly DDG_URL = "https://html.duckduckgo.com/html";
   private static readonly HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
   };
@@ -208,44 +194,6 @@ class NpmSearcher { /* ... (same as before, method signatures might need slight 
       return { packages, totalResults: data.total };
     } catch (error) {
       throw new Error(`Error searching npm packages: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-
-  async enhancedSearch(args: EnhancedSearchNpmArgs): Promise<SearchResult[]> {
-     const { query, maxResults } = args;
-    const enhancedQuery = `${query} site:npmjs.com`;
-    try {
-      await this.rateLimiter.acquire();
-      logger.info(`Searching DuckDuckGo for: ${enhancedQuery}`);
-      const formData = new URLSearchParams({ q: enhancedQuery, b: "", kl: "" });
-      const response = await fetch(NpmSearcher.DDG_URL, {
-        method: 'POST',
-        headers: { ...NpmSearcher.HEADERS, 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: formData.toString(),
-      });
-      if (!response.ok) throw new Error(`HTTP error! Status: ${response.status}`);
-      const html = await response.text();
-      const $ = cheerio.load(html);
-      if (!$) { logger.error("Failed to parse HTML response"); return []; }
-      const results: SearchResult[] = [];
-      $('.result').each((index, element) => {
-        if (results.length >= maxResults) return false;
-        const titleElem = $(element).find('.result__title a');
-        if (!titleElem.length) return true;
-        const title = titleElem.text().trim();
-        let link = titleElem.attr('href') || "";
-        if (link.includes('y.js')) return true; // Skip ads
-        if (link.startsWith('//duckduckgo.com/l/?uddg=')) {
-          try { link = decodeURIComponent(link.split('uddg=')[1].split('&')[0]); } catch (e) { /* use original */ }
-        }
-        const snippet = $(element).find('.result__snippet').text().trim() || "";
-        results.push({ title, link, snippet, position: results.length + 1 });
-      });
-      logger.info(`Successfully found ${results.length} results`);
-      return results;
-    } catch (error) {
-      logger.error(`Error during enhanced search: ${error instanceof Error ? error.message : String(error)}`);
-      throw error; // Propagate error
     }
   }
 
@@ -299,7 +247,7 @@ class NpmSearcher { /* ... (same as before, method signatures might need slight 
     }
   }
 
-  formatSearchResults(results: NpmSearchResult): string { /* ... (same as before) ... */
+  formatSearchResults(results: NpmSearchResult): string {
     if (!results.packages.length) return "No packages found.";
     let output = `Found ${results.totalResults} packages (showing ${results.packages.length}):\n\n`;
     results.packages.forEach(pkg => {
@@ -310,17 +258,8 @@ class NpmSearcher { /* ... (same as before, method signatures might need slight 
     });
     return output;
   }
-  formatEnhancedSearchResults(results: SearchResult[]): string { /* ... (same as before) ... */
-    if (!results.length) return "No packages found.";
-    let output = `Found ${results.length} NPM packages:\n\n`;
-    results.forEach(result => {
-      output += `📦 ${result.title}\n`;
-      if (result.snippet) output += `   Description: ${result.snippet}\n`;
-      output += `   URL: ${result.link}\n\n`;
-    });
-    return output;
-  }
-  formatVersions(packageName: string, versions: string[]): string { /* ... (same as before) ... */
+
+  formatVersions(packageName: string, versions: string[]): string {
     if (!versions.length) return `No versions found for ${packageName}.`;
     let output = `📦 ${packageName}\nAvailable versions (newest first):\n`;
     output += versions.slice(0, 15).join(', ');
@@ -333,7 +272,7 @@ class NpmSearcher { /* ... (same as before, method signatures might need slight 
 class NpmCheckUpdatesHandler {
   private resolvePackagePath(packagePath?: string): string { /* ... (same as before) ... */
     const resolvedPath = path.resolve(process.cwd(), packagePath || 'package.json');
-    if (!fs.existsSync(resolvedPath)) {
+    if (!fs.pathExistsSync(resolvedPath)) {
       throw new Error(`Package file not found: ${resolvedPath}`);
     }
     return resolvedPath;
@@ -481,7 +420,7 @@ class NpmCheckUpdatesHandler {
 const server = new Server(
   {
     name: "npm-helper-mcp",
-    version: "2.0.3",
+    version: "2.0.4",
   },
   {
     capabilities: {
@@ -513,7 +452,6 @@ server.setRequestHandler(
     return {
       tools: [
         { name: "search_npm", description: "Search for npm packages", inputSchema: { type: "object", properties: { query: { type: "string" }, maxResults: { type: "number", default: 10 } }, required: ["query"] }},
-        { name: "enhanced_search_npm", description: "Enhanced search for npm packages using natural language", inputSchema: { type: "object", properties: { query: { type: "string" }, maxResults: { type: "number", default: 10 } }, required: ["query"] }},
         { name: "fetch_package_content", description: "Fetch detailed content from an npm package page URL", inputSchema: { type: "object", properties: { url: { type: "string" } }, required: ["url"] }},
         { name: "get_package_versions", description: "Get available versions for an npm package", inputSchema: { type: "object", properties: { packageName: { type: "string" } }, required: ["packageName"] }},
         { name: "get_package_details", description: "Get detailed information about an npm package", inputSchema: { type: "object", properties: { packageName: { type: "string" } }, required: ["packageName"] }},
@@ -535,7 +473,15 @@ server.setRequestHandler(
       resources: [], 
       tools: [
         { name: "search_npm", description: "Search for npm packages", inputSchema: { type: "object", properties: { query: { type: "string" }, maxResults: { type: "number", default: 10 } }, required: ["query"] }},
-        // ... same as above ...
+        { name: "fetch_package_content", description: "Fetch detailed content from an npm package page URL", inputSchema: { type: "object", properties: { url: { type: "string" } }, required: ["url"] }},
+        { name: "get_package_versions", description: "Get available versions for an npm package", inputSchema: { type: "object", properties: { packageName: { type: "string" } }, required: ["packageName"] }},
+        { name: "get_package_details", description: "Get detailed information about an npm package", inputSchema: { type: "object", properties: { packageName: { type: "string" } }, required: ["packageName"] }},
+        { name: "check_updates", description: "Scan package.json for outdated dependencies", inputSchema: { type: "object", properties: { packagePath: { type: "string" }, filter: { type: "array", items: { type: "string" }}, reject: { type: "array", items: { type: "string" }}, target: { type: "string", enum: NcuTargetEnum.options }, peer: { type: "boolean" }, minimal: { type: "boolean" }, packageManager: { type: "string", enum: PackageManagerEnum.options } }}},
+        { name: "upgrade_packages", description: "Upgrade dependencies in package.json", inputSchema: { type: "object", properties: { packagePath: { type: "string" }, upgradeType: { type: "string", enum: NcuTargetEnum.options }, peer: { type: "boolean" }, minimal: { type: "boolean" }, packageManager: { type: "string", enum: PackageManagerEnum.options } }}},
+        { name: "filter_updates", description: "Check/upgrade updates for specific packages", inputSchema: { type: "object", properties: { packagePath: { type: "string" }, filter: { type: "array", items: { type: "string" }}, upgrade: { type: "boolean" }, minimal: { type: "boolean" }, packageManager: { type: "string", enum: PackageManagerEnum.options } }, required: ["filter"] }},
+        { name: "resolve_conflicts", description: "Handle dependency conflicts (uses 'peer' strategy)", inputSchema: { type: "object", properties: { packagePath: { type: "string" }, upgrade: { type: "boolean" }, minimal: { type: "boolean" }, packageManager: { type: "string", enum: PackageManagerEnum.options } }}},
+        { name: "set_version_constraints", description: "Configure version upgrade rules for dependencies", inputSchema: { type: "object", properties: { packagePath: { type: "string" }, target: { type: "string", enum: NcuTargetEnum.options }, removeRange: { type: "boolean" }, upgrade: { type: "boolean" }, minimal: { type: "boolean" }, packageManager: { type: "string", enum: PackageManagerEnum.options } }, required: ["target"] }},
+        { name: "run_doctor", description: "Iteratively install upgrades and run tests", inputSchema: { type: "object", properties: { packagePath: { type: "string" }, doctorInstall: { type: "string" }, doctorTest: { type: "string" }, packageManager: { type: "string", enum: PackageManagerEnum.options } }}}
       ] 
     }
   })
@@ -554,12 +500,6 @@ server.setRequestHandler(
           if (!parsedArgs.success) throw new McpError(ErrorCode.InvalidParams, `Invalid arguments: ${parsedArgs.error.format()}`);
           const results = await npmSearcher.searchPackages(parsedArgs.data);
           return { content: [{ type: "text", text: npmSearcher.formatSearchResults(results) }] };
-        }
-        case "enhanced_search_npm": {
-          parsedArgs = EnhancedSearchNpmSchema.safeParse(args);
-          if (!parsedArgs.success) throw new McpError(ErrorCode.InvalidParams, `Invalid arguments: ${parsedArgs.error.format()}`);
-          const results = await npmSearcher.enhancedSearch(parsedArgs.data);
-          return { content: [{ type: "text", text: npmSearcher.formatEnhancedSearchResults(results) }] };
         }
         case "fetch_package_content": {
           parsedArgs = FetchPackageContentSchema.safeParse(args);
@@ -638,15 +578,10 @@ server.setRequestHandler(
 // Launch the server
 async function runServer() {
   try {
-    // CRITICAL: Only write to stderr, never stdout which must be kept clean for MCP
-    logger.info("NPM Helper MCP Server starting up...");
     
-    // Connect to the transport BEFORE logging any startup messages
     const transport = new StdioServerTransport();
     await server.connect(transport);
     
-    // Continue with post-connect logging to stderr only
-    logger.info("NPM Helper MCP Server connected and listening for requests");
   } catch (error) {
     logger.error(`Fatal error starting server: ${error instanceof Error ? error.message : String(error)}`);
     process.exit(1);

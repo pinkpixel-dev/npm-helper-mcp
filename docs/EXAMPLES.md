@@ -18,20 +18,6 @@ To search for React-related packages:
 }
 ```
 
-### Enhanced Natural Language Search
-
-To find packages matching a more complex query:
-
-```json
-{
-  "name": "enhanced_search_npm",
-  "arguments": {
-    "query": "best state management library for React with hooks support",
-    "maxResults": 5
-  }
-}
-```
-
 ### Fetch Detailed Package Content
 
 To fetch and parse detailed content from a package page:

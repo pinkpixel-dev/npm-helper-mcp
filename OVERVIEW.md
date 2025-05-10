@@ -2,7 +2,7 @@
 
 ## Project Information
 - **Name**: npm-helper-mcp
-- **Version**: 2.0.3
+- **Version**: 2.0.4
 - **Date Last Updated**: May 10, 2025
 - **Author**: Pink Pixel
 
@@ -22,7 +22,6 @@ The project follows a clean architecture pattern with these main components:
 
 ### NPM Package Search Tools
 - **searchPackages**: Search npmjs.org registry for packages
-- **enhancedSearch**: Enhanced natural language search using DuckDuckGo
 - **fetchPackageContent**: Scrape and extract content from npm package pages
 - **getPackageVersions**: Retrieve version history of packages
 - **getPackageDetails**: Fetch detailed package metadata

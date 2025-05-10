@@ -35,31 +35,6 @@ A formatted text response containing matching packages with details like:
 - Keywords
 - Homepage URL
 
-### `enhanced_search_npm`
-
-Enhanced natural language search for npm packages using DuckDuckGo.
-
-**Input Parameters:**
-
-- `query`: (string, required) - Natural language search query for npm packages
-- `maxResults`: (number, optional) - Maximum number of results to return (default: 10, max: 20)
-
-**Example:**
-
-```json
-{
-  "query": "best react state management library with hooks support",
-  "maxResults": 5
-}
-```
-
-**Output:**
-A formatted text response containing matching packages with details like:
-
-- Package name
-- Description (from search snippet)
-- URL to the npm package page
-
 ### `fetch_package_content`
 
 Fetch and parse detailed content from an npm package page.
