@@ -71,8 +71,6 @@ The easiest way to use the server is to run it with npx, which requires no local
 
    ```bash
 
-   ```
-
   npx -y @pinkpixel/npm-helper-mcp
 
 ```
