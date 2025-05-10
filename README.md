@@ -69,12 +69,8 @@ The easiest way to use the server is to run it with npx, which requires no local
 
 2. Enter the command to run the server in your application's mcp configuration settings.
 
-   ```bash
-
-   ```
-
+```bash
   npx -y @pinkpixel/npm-helper-mcp
-
 ```
 
 ### Option 2: Local installation
