@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/pinkpixel-dev-npm-helper-mcp-badge.png)](https://mseep.ai/app/pinkpixel-dev-npm-helper-mcp)
+
 <div align="center">
   <img src="https://res.cloudinary.com/di7ctlowx/image/upload/v1746886361/npm-helper-mcp-icon_tkot9i.png" alt="NPM Helper MCP Logo" width="300" height="300"/>
 </div>
